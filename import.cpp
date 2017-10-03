@@ -2,10 +2,13 @@
 // grindtrick import pstream
 // grindtrick import boost_locale
 
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <vector>
 #include <set>
+#include <boost/range/algorithm/count_if.hpp>
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <boost/locale/encoding.hpp>
@@ -14,15 +17,39 @@
 
 using namespace boost::property_tree;
 using namespace boost::locale::conv;
+using namespace boost::algorithm;
+using namespace boost::range;
 using namespace std;
 
 wstring g_sphere_tag;
 
+wstring const SUBJECT_FIELD_NAME(L"Sujet");
+wstring const TAG_FIELD_NAME(L"\u00C9tiquettes");
+
+class check_error
+{
+public:
+	check_error(wstring const & msg) : msg_(msg) {}
+
+	void set_note_title(wstring const & t)
+	{
+		title_ = t;
+	}
+
+	wstring msg_;
+	wstring title_;
+
+	wstring user_message() const
+	{
+		if( title_.empty() ) return L"check_error: " + msg_;
+		return L'"' + title_ + L"\": " + msg_;
+	}
+};
+
 wstring to_markdown(wstring const & content)
 {
-	// TODO: stop saving this
-	wofstream ifs("to_markdown_input");
-	ifs << content;
+	//wofstream ifs("to_markdown_input");
+	//ifs << content;
 
 	using namespace redi;
 
@@ -38,21 +65,21 @@ wstring to_markdown(wstring const & content)
 
 	peof(in); // close stdin so client knows to finish
 
-	// TODO: stop saving this
-	ofstream of("to_markdown_result");
+	//ofstream of("to_markdown_result");
 
 	string line;
 	string markdown;
 	while( getline(in, line) )
 	{
 		markdown = markdown + line + "\n";
-		of << line << '\n';
+		//of << line << '\n';
 	}	
 
-	// TODO: to_markdown keeps &nbsp, which I do not care about
-	// Replace them.
+	auto r = utf_to_utf<wchar_t, char>(markdown.c_str());
 
-	return utf_to_utf<wchar_t, char>(markdown.c_str());
+	replace_all(r, L"&nbsp;", L" ");
+
+	return r;
 }
 
 class Attachment
@@ -69,6 +96,7 @@ public:
 	wstring title_;
 	wstring content_;
 	set<wstring> tags_;
+	wstring project_;
 	vector<Attachment> attachments_;
 };
 
@@ -105,26 +133,34 @@ Attachment resource(wptree const & pt)
 	return a;
 }
 
+void check_for_valid_tag(wstring const & t)
+{
+	if( t.empty() ) throw check_error(L"tag cannot be empty string");
+	if( count( t.begin(), t.end(), L'#' ) != 0 ) throw check_error(L"Evernote tag cannot contain hash");
+	if( count_if( t, iswspace ) ) throw check_error(L"tag must be a single word");
+}
+
 void write_note(Note const & n)
 {
-	set<wstring> full_tags_set(n.tags_);
-	full_tags_set.insert(g_sphere_tag);
-	full_tags_set.insert(L"imported");
+	for(auto t: n.tags_)
+	{
+		check_for_valid_tag(t);
+	}
 
-	// TODO: project tag: pick first tag not g_sphere_of_life
 	// TODO: make sure file name is clean for fielsystem
-	string fn;
-	fn = "inro imported " + from_utf(n.title_, "UTF-8") + ".md";
+
+	wstring wfn = g_sphere_tag + L" " + n.project_ + L" " + n.title_ + L".md";
+	string fn = from_utf(wfn, "UTF-8") ;
+
 	wofstream os(fn);
 
-	os << L"Sujet: " << n.title_ << '\n';
+	os << SUBJECT_FIELD_NAME << ": " << n.title_ << '\n';
 
-	// TODO: proper accented field name.
-	os << L"Etiquettes: ";
+	os << TAG_FIELD_NAME << ": ";
 
-	for(auto t: full_tags_set)
+	for(auto t: n.tags_)
 	{
-		os << t << L' ';
+		os << L'#' << t << L' ';
 	}
 	os << '\n';
 
@@ -172,7 +208,29 @@ void note(wptree const & pt)
 		}
 	}
 
-	write_note(n);
+	n.tags_.insert(g_sphere_tag);
+
+	n.project_ = L"imported";
+	for(auto v: n.tags_)
+	{
+		if( v != g_sphere_tag )
+		{
+			n.project_ = v;
+			break;
+		}
+	}
+
+	n.tags_.insert(L"imported");
+
+	try
+	{
+		write_note(n);
+	}
+	catch(check_error & ex)
+	{
+		ex.set_note_title(n.title_);
+		throw;
+	}
 }
 
 int main(int argc, char ** argv)
@@ -204,6 +262,11 @@ int main(int argc, char ** argv)
 	catch(exception const & ex)
 	{
 		cerr << "exception: " << ex.what() << '\n';
+		return 1;
+	}
+	catch(check_error const & ex)
+	{
+		wcerr << ex.user_message() << '\n';
 		return 1;
 	}
 	
