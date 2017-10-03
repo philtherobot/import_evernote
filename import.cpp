@@ -1,38 +1,58 @@
 
 // grindtrick import pstream
+// grindtrick import boost_locale
 
 #include <iostream>
 #include <fstream>
+#include <vector>
+#include <set>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
+#include <boost/locale/encoding.hpp>
 
 #include <pstream.h>
 
 using namespace boost::property_tree;
+using namespace boost::locale::conv;
 using namespace std;
+
+wstring g_sphere_tag;
 
 wstring to_markdown(wstring const & content)
 {
+	// TODO: stop saving this
+	wofstream ifs("to_markdown_input");
+	ifs << content;
+
 	using namespace redi;
 
 	vector<string> args;
 	args.push_back("node");
 	args.push_back("to_markdown.js");
 
- 	typedef basic_pstream<wchar_t> wpstream;
+	pstream in("node", args, pstreambuf::pstdin | pstreambuf::pstdout);
 
-	wpstream in("node", args, pstreambuf::pstdin | pstreambuf::pstdout);
-	in << content;
+	string utf8 = utf_to_utf<char, wchar_t>(content.c_str());
+
+	in << utf8;
+
 	peof(in); // close stdin so client knows to finish
 
-	wstring line;
-	wstring markdown;
+	// TODO: stop saving this
+	ofstream of("to_markdown_result");
+
+	string line;
+	string markdown;
 	while( getline(in, line) )
 	{
-		markdown = markdown + line + L"\n";
+		markdown = markdown + line + "\n";
+		of << line << '\n';
 	}	
 
-	return markdown;
+	// TODO: to_markdown keeps &nbsp, which I do not care about
+	// Replace them.
+
+	return utf_to_utf<wchar_t, char>(markdown.c_str());
 }
 
 class Attachment
@@ -43,6 +63,14 @@ public:
 	wstring filename_;
 };
 
+class Note
+{
+public:
+	wstring title_;
+	wstring content_;
+	set<wstring> tags_;
+	vector<Attachment> attachments_;
+};
 
 Attachment resource(wptree const & pt)
 {
@@ -66,7 +94,7 @@ Attachment resource(wptree const & pt)
 		}
 	}
 
-	auto opt_res_attr = pt.get_child_optional(L"resource-attributes" );
+	auto opt_res_attr = pt.get_child_optional(L"resource-attributes");
 	if( opt_res_attr )
 	{
 		auto res_attr = *opt_res_attr;
@@ -77,43 +105,74 @@ Attachment resource(wptree const & pt)
 	return a;
 }
 
+void write_note(Note const & n)
+{
+	set<wstring> full_tags_set(n.tags_);
+	full_tags_set.insert(g_sphere_tag);
+	full_tags_set.insert(L"imported");
+
+	// TODO: project tag: pick first tag not g_sphere_of_life
+	// TODO: make sure file name is clean for fielsystem
+	string fn;
+	fn = "inro imported " + from_utf(n.title_, "UTF-8") + ".md";
+	wofstream os(fn);
+
+	os << L"Sujet: " << n.title_ << '\n';
+
+	// TODO: proper accented field name.
+	os << L"Etiquettes: ";
+
+	for(auto t: full_tags_set)
+	{
+		os << t << L' ';
+	}
+	os << '\n';
+
+	os << '\n';
+
+	os << n.content_;
+
+	// TODO: save attachments
+}
 
 void note(wptree const & pt)
 {
-	wstring title;
-	wstring content;
-	vector<wstring> tags;
-	vector<Attachment> attachments;
+	Note n;
 
 	for(auto v: pt)
 	{
 		if( v.first == L"title" )
 		{
-			title = v.second.get_value<wstring>();
-			wcout << title << '\n';
+			n.title_ = v.second.get_value<wstring>();
 		}
 		else if( v.first == L"content")
 		{
-			content = v.second.get_value<wstring>();
+			wstring en_note = v.second.get_value<wstring>();
+			// en_note is a full XML document.
+			// The HTML of the note is inside the <en-note> tag.
+
+			wptree en_note_ptree;
+			wistringstream is(en_note);
+			read_xml(is, en_note_ptree);
+
+			auto enote = en_note_ptree.get_child(L"en-note");
+
+			wostringstream os;
+			write_xml(os, enote);
+			
+			n.content_ = to_markdown( os.str() );
 		}
 		else if( v.first == L"tag")
 		{
-			tags.push_back( v.second.get_value<wstring>() );
+			n.tags_.insert( v.second.get_value<wstring>() );
 		}
 		else if( v.first == L"resource")
 		{
-			attachments.push_back( resource(v.second) );
+			n.attachments_.push_back( resource(v.second) );
 		}
 	}
 
-	if( !tags.empty() )
-	{
-		wcout << "  tags: ";
-		for(auto v: tags) wcout << v << ' ';
-		wcout << '\n';
-	}
-
-	wcout << "content: " << to_markdown(content);
+	write_note(n);
 }
 
 int main(int argc, char ** argv)
@@ -127,6 +186,8 @@ int main(int argc, char ** argv)
 		wptree pt;
 
 		char const * fn = "INRO.enex";
+		g_sphere_tag = L"inro";
+
 		if( argc >= 2 ) fn = argv[1];
 
 		wifstream enex_file(fn);
