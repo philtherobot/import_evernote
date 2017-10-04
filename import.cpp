@@ -1,17 +1,23 @@
 
 // grindtrick import pstream
 // grindtrick import boost_locale
+// grindtrick import boost_filesystem
+// grindtrick import boost_system
 
 #include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <regex>
 #include <set>
 #include <boost/range/algorithm/count_if.hpp>
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/algorithm/string/erase.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <boost/locale/encoding.hpp>
+#include <boost/filesystem.hpp>
 
 #include <pstream.h>
 
@@ -19,7 +25,10 @@ using namespace boost::property_tree;
 using namespace boost::locale::conv;
 using namespace boost::algorithm;
 using namespace boost::range;
+using namespace boost::filesystem;
 using namespace std;
+
+#include "base64.cpp"
 
 wstring g_sphere_tag;
 
@@ -31,18 +40,11 @@ class check_error
 public:
 	check_error(wstring const & msg) : msg_(msg) {}
 
-	void set_note_title(wstring const & t)
-	{
-		title_ = t;
-	}
-
 	wstring msg_;
-	wstring title_;
 
 	wstring user_message() const
 	{
-		if( title_.empty() ) return L"check_error: " + msg_;
-		return L'"' + title_ + L"\": " + msg_;
+		return msg_;
 	}
 };
 
@@ -133,26 +135,57 @@ Attachment resource(wptree const & pt)
 	return a;
 }
 
+bool is_valid_fn_char(wchar_t c)
+{
+	if( c < 32 ) return false;
+	wstring invalids = L"<>:\"/\\|?*.";
+	if( count(invalids.begin(), invalids.end(), c) != 0 ) return false;
+	return true;
+}
+
 void check_for_valid_tag(wstring const & t)
 {
 	if( t.empty() ) throw check_error(L"tag cannot be empty string");
 	if( count( t.begin(), t.end(), L'#' ) != 0 ) throw check_error(L"Evernote tag cannot contain hash");
 	if( count_if( t, iswspace ) ) throw check_error(L"tag must be a single word");
+	if( ! all_of(t.begin(), t.end(), is_valid_fn_char) ) throw check_error(L"tag contains invalid characters");
+}
+
+void check_for_valid_title(wstring const & t)
+{
+	if( ! all_of(t.begin(), t.end(), is_valid_fn_char) ) throw check_error(L"title contains invalid characters");
+}
+
+void write_attachment(boost::filesystem::wpath const & annex_path, Attachment const & a)
+{
+	boost::filesystem::wpath path = annex_path / a.filename_;
+
+	if( a.encoding_ != L"base64" )
+	{
+		throw check_error(L"unsupported attachment encoding: " + a.encoding_);
+	}
+
+	string data;
+	data.resize(a.data_.size());
+	copy(a.data_.begin(), a.data_.end(), data.begin());
+	erase_all(data, "\n");
+	erase_all(data, "\r");
+
+	auto dec = b64decode(data);
+	cout << "data size = " << dec.size() << '\n';
+	auto fn = path.string<string>();
+	cout << "file is " << fn << '\n';
+	std::ofstream os(fn, ios::binary);
+	os.exceptions(~ios::goodbit);
+	os << dec;
 }
 
 void write_note(Note const & n)
 {
-	for(auto t: n.tags_)
-	{
-		check_for_valid_tag(t);
-	}
-
-	// TODO: make sure file name is clean for fielsystem
-
 	wstring wfn = g_sphere_tag + L" " + n.project_ + L" " + n.title_ + L".md";
 	string fn = from_utf(wfn, "UTF-8") ;
 
-	wofstream os(fn);
+	std::wofstream os(fn);
 
 	os << SUBJECT_FIELD_NAME << ": " << n.title_ << '\n';
 
@@ -168,7 +201,16 @@ void write_note(Note const & n)
 
 	os << n.content_;
 
-	// TODO: save attachments
+	if( !n.attachments_.empty() )
+	{
+		boost::filesystem::wpath note_fn(wfn);
+		boost::filesystem::wpath annex_fn = note_fn.stem().wstring() + L".annexes";
+		create_directory(annex_fn);
+		for(auto a: n.attachments_)
+		{
+			write_attachment(annex_fn, a);
+		}
+	}
 }
 
 void note(wptree const & pt)
@@ -180,6 +222,8 @@ void note(wptree const & pt)
 		if( v.first == L"title" )
 		{
 			n.title_ = v.second.get_value<wstring>();
+			trim(n.title_);
+			check_for_valid_title(n.title_);
 		}
 		else if( v.first == L"content")
 		{
@@ -200,7 +244,10 @@ void note(wptree const & pt)
 		}
 		else if( v.first == L"tag")
 		{
-			n.tags_.insert( v.second.get_value<wstring>() );
+			auto tag = v.second.get_value<wstring>();
+			trim(tag);
+			check_for_valid_tag(tag);
+			n.tags_.insert(tag);
 		}
 		else if( v.first == L"resource")
 		{
@@ -222,15 +269,7 @@ void note(wptree const & pt)
 
 	n.tags_.insert(L"imported");
 
-	try
-	{
-		write_note(n);
-	}
-	catch(check_error & ex)
-	{
-		ex.set_note_title(n.title_);
-		throw;
-	}
+	write_note(n);
 }
 
 int main(int argc, char ** argv)
@@ -241,21 +280,44 @@ int main(int argc, char ** argv)
 
 	try
 	{
-		wptree pt;
-
-		char const * fn = "INRO.enex";
 		g_sphere_tag = L"inro";
 
-		if( argc >= 2 ) fn = argv[1];
-
-		wifstream enex_file(fn);
-		read_xml(enex_file, pt);
-
-		for(auto v: pt.get_child(L"en-export"))
+		if( argc >= 2 ) 
 		{
-			if( v.first == L"note" )
+			g_sphere_tag = to_utf<wchar_t>(argv[1], "UTF-8");
+		}
+
+		regex wc("[0-9]*\\.xml");
+		smatch mo;
+
+		for(auto e: directory_iterator("."))
+		{
+			if( !is_regular_file(e) ) continue;
+
+			string fn = e.path().filename().string();
+
+			if( !regex_match(fn, mo, wc) ) continue;
+
+			std::wifstream note_file(e.path().string());
+			note_file.exceptions(~ios::goodbit);
+
+			wptree pt;
+			read_xml(note_file, pt);
+
+			cout << fn << '\n';
+
+			try
 			{
-				note(v.second);
+				note(pt);
+				remove(e.path());
+			}
+			catch(exception const & ex)
+			{
+				cerr << "exception: " << ex.what() << '\n';
+			}
+			catch(check_error const & ex)
+			{
+				wcerr << fn << ": " << ex.user_message() << '\n';
 			}
 		}
 	}	
