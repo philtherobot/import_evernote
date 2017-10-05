@@ -263,13 +263,18 @@ void note(wptree const & pt)
 
             auto enote = en_note_ptree.get_child(L"en-note");
 
-            wostringstream os;
-            write_xml(os, enote);
-            
-            n.content_ = to_markdown( os.str() );
-
-            // TODO: sometimes, there is a surrounding <pre>
-            // tag.  Useless.  Please remove.
+            auto pre_opt = enote.get_child_optional(L"pre");
+            if( pre_opt )
+            {
+                n.content_ = (*pre_opt).get_value<wstring>();
+            }
+            else
+            {
+                wostringstream os;
+                write_xml(os, enote);
+                
+                n.content_ = to_markdown( os.str() );
+            }
         }
         else if( v.first == L"tag")
         {
