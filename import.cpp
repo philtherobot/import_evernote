@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <fstream>
 #include <vector>
 #include <regex>
@@ -151,14 +152,32 @@ void check_for_valid_tag(wstring const & t)
     if( ! all_of(t.begin(), t.end(), is_valid_fn_char) ) throw check_error(L"tag contains invalid characters");
 }
 
+void repair_title(wstring & t)
+{
+    wstring r;
+    copy_if(t.begin(), t.end(), back_inserter(r), is_valid_fn_char);
+    t = r;
+    trim(t);
+}
+
 void check_for_valid_title(wstring const & t)
 {
     if( ! all_of(t.begin(), t.end(), is_valid_fn_char) ) throw check_error(L"title contains invalid characters");
 }
 
-void write_attachment(boost::filesystem::wpath const & annex_path, Attachment const & a)
+void write_attachment(boost::filesystem::wpath const & annex_path, Attachment const & a, int & counter)
 {
-    boost::filesystem::wpath path = annex_path / a.filename_;
+    auto afn = a.filename_;
+
+    if( afn.empty() )
+    {
+        wostringstream afn_os;
+        afn_os << setw(5) << setfill(L'0')  << counter;
+        ++ counter;
+        afn = afn_os.str();
+    }
+
+    boost::filesystem::wpath path = annex_path / afn;
 
     if( a.encoding_ != L"base64" )
     {
@@ -211,9 +230,10 @@ void write_note(Note const & n)
         boost::filesystem::wpath note_fn(wfn);
         boost::filesystem::wpath annex_fn = note_fn.stem().wstring() + L".annexes";
         create_directory(annex_fn);
+        int counter = 1;
         for(auto a: n.attachments_)
         {
-            write_attachment(annex_fn, a);
+            write_attachment(annex_fn, a, counter);
         }
     }
 }
@@ -228,6 +248,7 @@ void note(wptree const & pt)
         {
             n.title_ = v.second.get_value<wstring>();
             trim(n.title_);
+            repair_title(n.title_);
             check_for_valid_title(n.title_);
         }
         else if( v.first == L"content")
@@ -246,6 +267,9 @@ void note(wptree const & pt)
             write_xml(os, enote);
             
             n.content_ = to_markdown( os.str() );
+
+            // TODO: sometimes, there is a surrounding <pre>
+            // tag.  Useless.  Please remove.
         }
         else if( v.first == L"tag")
         {
