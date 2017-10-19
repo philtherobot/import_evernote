@@ -51,18 +51,17 @@ public:
 
 wstring to_markdown(wstring const & content)
 {
-    //wofstream ifs("to_markdown_input");
-    //ifs << content;
-
     using namespace redi;
 
     vector<string> args;
-    args.push_back("node");
-    args.push_back("to_markdown.js");
+    args.push_back("html2text");
 
-    pstream in("node", args, pstreambuf::pstdin | pstreambuf::pstdout);
+    pstream in("html2text", args, pstreambuf::pstdin | pstreambuf::pstdout);
 
     string utf8 = utf_to_utf<char, wchar_t>(content.c_str());
+
+    //std::ofstream ifs("to_markdown_input");
+    //ifs << utf8;
 
     in << utf8;
 
@@ -77,6 +76,17 @@ wstring to_markdown(wstring const & content)
         markdown = markdown + line + "\n";
         //of << line << '\n';
     }   
+
+    in.close();
+    if( !in.rdbuf()->exited() )
+    {
+        throw check_error(L"html2text failed to exit");
+    }
+
+    if( in.rdbuf()->status() != 0 )
+    {
+        throw check_error(L"html2text exited with non-zero status");
+    }
 
     auto r = utf_to_utf<wchar_t, char>(markdown.c_str());
 
@@ -139,7 +149,7 @@ Attachment resource(wptree const & pt)
 bool is_valid_fn_char(wchar_t c)
 {
     if( c < 32 ) return false;
-    wstring invalids = L"<>:\"/\\|?*.";
+    wstring invalids = L"<>:\"/\\|?*";
     if( count(invalids.begin(), invalids.end(), c) != 0 ) return false;
     return true;
 }
