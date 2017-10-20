@@ -49,12 +49,75 @@ public:
     }
 };
 
+wptree replace_nbsp(wptree const & n)
+{
+    auto d = n.data();
+    replace_all(d, L"&nbsp;", L" ");
+
+    auto r = wptree(d);
+
+    for(auto child: n)
+    {
+        auto no_nbsp = replace_nbsp(child.second);
+        r.push_back( make_pair(child.first, no_nbsp ) );
+    }
+
+    return r;
+}
+
+wstring to_html(wptree const & enote, wstring const & title)
+{
+    // nbsp are preserved by read_xml.
+    // The data in the nodes have been decoded, except
+    // nbsp.  If the original enote contained "&lt;",
+    // data is "<", but "&nbsp;" are left as-is.
+
+    // We do not care ofr nbspaces and we do not want 
+    // the string "&nbsp;" to appear as regular text 
+    // in our output.  So we remove them.
+
+    auto copy = replace_nbsp(enote);
+
+    wostringstream os;
+    write_xml(os, copy);
+
+    wstring encoded_title(title);
+    if( encoded_title.size() )
+    {
+        replace_all(encoded_title, L"<", L"&lt;");
+        replace_all(encoded_title, L">", L"&gt;");
+        replace_all(encoded_title, L"&", L"&amp;");
+
+        encoded_title = L"<title>" + encoded_title + L"</title>\n";
+    }
+
+    auto r = os.str();
+
+    erase_all(r, L"<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+
+    r = L"<!DOCTYPE html>\n" 
+        L"<html>\n"
+        L"<meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\">\n"
+        + encoded_title +
+        L"<body>\n"
+        + r +
+        L"</body></html>\n"
+    ;
+
+    return r;
+}
+
 wstring to_markdown(wstring const & content)
 {
     using namespace redi;
 
     vector<string> args;
     args.push_back("html2text");
+    args.push_back("-nobs");
+    args.push_back("-style");
+    args.push_back("pretty");
+    args.push_back("-width");
+    args.push_back("99");
 
     pstream in("html2text", args, pstreambuf::pstdin | pstreambuf::pstdout);
 
@@ -108,9 +171,11 @@ class Note
 public:
     wstring title_;
     wstring content_;
+    wstring content_as_html_;
     set<wstring> tags_;
     wstring project_;
     vector<Attachment> attachments_;
+    wstring basename_;
 };
 
 Attachment resource(wptree const & pt)
@@ -216,10 +281,10 @@ void write_attachment(boost::filesystem::wpath const & annex_path, Attachment co
 
 void write_note(Note const & n)
 {
-    wstring wfn = g_sphere_tag + L" " + n.project_ + L" " + n.title_ + L".md";
-    string fn = from_utf(wfn, "UTF-8") ;
+    wstring wnote_fn = n.basename_ + L".md";
+    string note_fn = from_utf(wnote_fn, "UTF-8") ;
 
-    std::wofstream os(fn);
+    std::wofstream os(note_fn);
 
     os << SUBJECT_FIELD_NAME << ": " << n.title_ << '\n';
 
@@ -237,14 +302,40 @@ void write_note(Note const & n)
 
     if( !n.attachments_.empty() )
     {
-        boost::filesystem::wpath note_fn(wfn);
-        boost::filesystem::wpath annex_fn = note_fn.stem().wstring() + L".annexes";
+        boost::filesystem::wpath annex_fn(n.basename_);
+        annex_fn += L".annexes";
         create_directory(annex_fn);
         int counter = 1;
         for(auto a: n.attachments_)
         {
             write_attachment(annex_fn, a, counter);
         }
+    }
+}
+
+void write_html_content(Note const & n)
+{
+    wstring whtml_fn = n.basename_ + L".html";
+    string html_fn = from_utf(whtml_fn, "UTF-8") ;
+
+    std::wofstream os(html_fn);
+
+    os << n.content_as_html_;
+}
+
+void print_tree(wptree const & t, int indent=0)
+{
+    wstring ide(indent*2, ' ');
+
+    std::wcout << ide;
+    std::wcout << t.data() << "\n";
+
+    for(auto c: t)
+    {
+        std::wcout << ide;
+        std::wcout << "<" << c.first << ">\n";
+
+        print_tree(c.second, indent+1);
     }
 }
 
@@ -264,14 +355,16 @@ void note(wptree const & pt)
         else if( v.first == L"content")
         {
             wstring en_note = v.second.get_value<wstring>();
-            // en_note is a full XML document.
-            // The HTML of the note is inside the <en-note> tag.
+            // en_note is an XML document until we get 
+            // inside the <en-note> tag.  In there is HMTL.
 
             wptree en_note_ptree;
             wistringstream is(en_note);
             read_xml(is, en_note_ptree);
 
             auto enote = en_note_ptree.get_child(L"en-note");
+
+            n.content_as_html_ = to_html(enote, n.title_);
 
             auto pre_opt = enote.get_child_optional(L"pre");
             if( pre_opt )
@@ -280,10 +373,7 @@ void note(wptree const & pt)
             }
             else
             {
-                wostringstream os;
-                write_xml(os, enote);
-                
-                n.content_ = to_markdown( os.str() );
+                n.content_ = to_markdown( n.content_as_html_ );
             }
         }
         else if( v.first == L"tag")
@@ -313,7 +403,10 @@ void note(wptree const & pt)
 
     n.tags_.insert(L"imported");
 
+    n.basename_ = g_sphere_tag + L" " + n.project_ + L" " + n.title_;
+
     write_note(n);
+    write_html_content(n);
 }
 
 int main(int argc, char ** argv)
